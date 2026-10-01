@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - 2026-10-01
+
+- Enforce the live 2048-byte frame limit in capture validation, with physical error line numbers and recovery after invalid records.
+- Stream replay captures through bounded reads instead of loading the entire file; preserve LF framing and accept an optional final newline.
+- Keep replay file open, read, and close operations off the event loop, including cleanup after cancellation.
+- Add capture boundary, recovery, bounded-read, cancellation, and downstream alert/WebSocket regression tests.
+- Clarify PowerShell setup, one-pass replay, repeated-sequence rejection, validation scope, and remaining integration limits in the README.
+
 ## 1.1.0 - 2026-09-04
 
 - Reject duplicate, backward, and ambiguous sequence numbers before changing health, history, alerts, or WebSocket output.

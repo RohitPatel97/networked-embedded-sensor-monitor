@@ -7,11 +7,13 @@ import logging
 import math
 import random
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 
+from .capture import iter_capture_file
 from .config import Settings
 from .models import FaultMode, WireTelemetry
-from .protocol import encode_frame
+from .protocol import MAX_FRAME_BYTES, encode_frame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,15 +92,26 @@ class ReplaySource(TelemetrySource):
     async def chunks(self, stop: asyncio.Event) -> AsyncIterator[bytes]:
         interval = 1.0 / self.rate_hz
         while not stop.is_set():
-            lines = await asyncio.to_thread(self.path.read_bytes)
             emitted = False
-            for line in lines.splitlines():
-                if stop.is_set():
-                    return
-                if line.strip():
+            records = iter_capture_file(self.path)
+            pending = None
+            try:
+                while not stop.is_set():
+                    pending = asyncio.create_task(asyncio.to_thread(next, records, None))
+                    record = await asyncio.shield(pending)
+                    if record is None or stop.is_set():
+                        break
+                    _, raw = record
                     emitted = True
-                    yield line + b"\n"
+                    yield raw + b"\n"
                     await asyncio.sleep(interval)
+            finally:
+                # A cancelled await does not stop a worker thread. Let an in-flight
+                # read finish before closing its generator, and keep close off-loop.
+                if pending is not None:
+                    with suppress(Exception):
+                        await pending
+                await asyncio.to_thread(records.close)
             if not self.loop or not emitted:
                 return
 
@@ -129,7 +142,9 @@ class SerialSource(TelemetrySource):
                     exclusive=True,
                 )
                 while not stop.is_set():
-                    chunk = await asyncio.to_thread(self._serial.read_until, b"\n", 2_049)
+                    chunk = await asyncio.to_thread(
+                        self._serial.read_until, b"\n", MAX_FRAME_BYTES + 1
+                    )
                     if chunk:
                         yield chunk
             except (serial.SerialException, OSError):

@@ -10,6 +10,8 @@ from pydantic import ValidationError
 
 from .models import TelemetryReading, WireTelemetry, utc_now
 
+MAX_FRAME_BYTES = 2_048
+
 
 class ProtocolError(ValueError):
     """Base class for rejected UART frames."""
@@ -26,7 +28,7 @@ class FrameDecodeError(ProtocolError):
 class NewlineJsonDecoder:
     """Incrementally split a byte stream into bounded, validated telemetry frames."""
 
-    def __init__(self, max_frame_bytes: int = 2_048) -> None:
+    def __init__(self, max_frame_bytes: int = MAX_FRAME_BYTES) -> None:
         if max_frame_bytes < 64:
             raise ValueError("max_frame_bytes is unreasonably small")
         self.max_frame_bytes = max_frame_bytes

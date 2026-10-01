@@ -6,7 +6,7 @@ from sensor_monitor.config import Settings
 from sensor_monitor.hub import TelemetryHub
 from sensor_monitor.models import WireTelemetry
 from sensor_monitor.protocol import encode_frame
-from sensor_monitor.sources import TelemetrySource
+from sensor_monitor.sources import ReplaySource, TelemetrySource
 
 from .helpers import reading
 
@@ -68,5 +68,37 @@ def test_duplicate_and_old_fault_frames_cannot_raise_alerts_or_reach_subscribers
             assert [item.sequence for item in await hub.store.readings(sample.device_id, 10)] == [
                 42, 43,
             ]
+
+    asyncio.run(scenario())
+
+
+def test_replay_rejects_oversized_fault_without_alerts_and_recovers(tmp_path) -> None:
+    async def scenario() -> None:
+        sample = WireTelemetry(**reading().model_dump(exclude={"received_at"}))
+        hot = sample.model_copy(update={"sequence": 43, "temperature_c": 100})
+        recovered = sample.model_copy(update={"sequence": 44})
+        capture = tmp_path / "oversized-fault.jsonl"
+        capture.write_bytes(
+            encode_frame(sample)
+            + encode_frame(hot).removesuffix(b"\n").ljust(100_000, b" ")
+            + b"\n"
+            + encode_frame(recovered).removesuffix(b"\n")
+        )
+        hub = TelemetryHub(Settings(), ReplaySource(capture, rate_hz=1000, loop=False))
+        async with hub.subscribe() as queue:
+            await hub.run()
+            assert hub.stats().frames_received == 3
+            assert hub.stats().frames_accepted == 2
+            assert hub.stats().parse_errors == 1
+            assert hub.stats().sequence_anomalies == 0
+            assert await hub.store.alerts(10) == []
+            assert queue.qsize() == 2
+            assert queue.get_nowait()["reading"]["sequence"] == 42
+            assert queue.get_nowait()["reading"]["sequence"] == 44
+            assert [item.sequence for item in await hub.store.readings(sample.device_id, 10)] == [
+                42, 44,
+            ]
+            health = await hub.store.health(sample.device_id)
+            assert health and health.last_sequence == 44
 
     asyncio.run(scenario())

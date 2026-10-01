@@ -34,26 +34,35 @@ _Deterministic simulator with an over-temperature fault injected through the liv
 | Corrupt or oversized UART input could hide later valid frames | Bounded incremental decoder resynchronizes at the next newline | `tests/test_protocol.py::test_event_decoder_recovers_around_malformed_frames`, `test_oversized_tail_is_discarded_until_delimiter` |
 | Unbounded device IDs could defeat per-device memory limits | Enforce a configurable device-count cap while allowing existing devices | `tests/test_store.py::test_device_count_is_bounded_without_rejecting_existing_device` |
 | Acquisition ends or crashes while HTTP stays alive | Readiness returns HTTP 503 when acquisition is no longer running | `tests/test_api.py::test_readiness_fails_when_source_has_finished`, `test_readiness_fails_when_source_crashes` |
+| An oversized capture passed the CLI validator but failed live ingestion | Share the live decoder and enforce the same byte limit, including CRLF and final-line cases | `tests/test_cli.py::test_validate_enforces_uart_byte_limit`, `test_validate_recovers_and_reports_physical_line_numbers` |
+| Replaying a large capture loaded the entire file into memory | Read bounded records, drain oversized lines, and recover at the next LF | `tests/test_sources.py::test_replay_reads_large_capture_in_bounded_pieces`, `tests/test_hub.py::test_replay_rejects_oversized_fault_without_alerts_and_recovers` |
 
 Architecture, wire protocol, API contracts, deployment, and validation boundaries follow below. [WORKFLOW.md](WORKFLOW.md) records completed work and next tasks.
 
 ## Quick start - no hardware required
 
-Python 3.11 or newer is required.
+Python 3.11 or newer is required. Clone the repository, then use the commands for your shell:
 
 ```bash
 git clone https://github.com/RohitPatel97/networked-embedded-sensor-monitor.git
 cd networked-embedded-sensor-monitor
+```
+
+Linux/macOS:
+
+```bash
 python -m venv .venv
-
-# Linux/macOS
 source .venv/bin/activate
-
-# Windows PowerShell
-# .venv\Scripts\Activate.ps1
-
 python -m pip install -e ".[dev]"
 sensor-monitor serve
+```
+
+Windows PowerShell (activation is optional):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\sensor-monitor.exe serve
 ```
 
 Open <http://127.0.0.1:8000> for the dashboard or <http://127.0.0.1:8000/docs> for interactive API documentation. Simulator telemetry begins immediately.
@@ -96,7 +105,7 @@ The acquisition loop is independent of HTTP clients. A slow WebSocket consumer c
 
 ## UART wire protocol
 
-The transport is UTF-8, newline-delimited JSON at 115200 baud by default. One line is one telemetry sample. The schema rejects unknown fields, invalid identifiers, out-of-range sensor values, invalid UTF-8, malformed JSON, and frames over 2048 bytes.
+The transport is UTF-8, newline-delimited JSON at 115200 baud by default. One line is one telemetry sample. The schema rejects unknown fields, invalid identifiers, out-of-range sensor values, invalid UTF-8, and malformed JSON. The frame limit is **2048 bytes before LF**; a CR in a CRLF ending counts toward that limit. Empty LF/CRLF lines are ignored; lines containing only spaces or tabs are rejected as invalid JSON.
 
 ```json
 {"schema_version":1,"device_id":"stm32-sensor-hub","sequence":122,"uptime_ms":12200,"temperature_c":24.66,"pressure_hpa":1013.23,"accel_g":[0.004,-0.004,1.002],"battery_v":12.41,"i2c_errors":0,"queue_drops":0,"watchdog_resets":0}
@@ -124,6 +133,10 @@ Validate a capture without starting the server:
 sensor-monitor validate examples/telemetry.jsonl
 # accepted=3 rejected=0
 ```
+
+The validator uses the same framing and schema checks as live ingestion. It reports errors with physical file line numbers, counts each oversized record once, continues to later valid records, and exits with status `1` if any record is rejected (`0` otherwise). File validation and replay use bounded reads, including for a single oversized line, and accept a final record without LF. Oversized records are drained through the next LF and only a bounded prefix is retained for rejection.
+
+This command checks framing and schema only. Duplicate sequences, out-of-order samples, device capacity, and alert transitions are evaluated by the running gateway; `accepted` here does not certify those stateful checks.
 
 ## API surface
 
@@ -171,14 +184,27 @@ sensor-monitor serve
 
 ### JSONL replay
 
-Replay a captured session to reproduce integration behavior:
+Replay a captured session once to reproduce integration behavior:
 
 ```bash
 SENSOR_MONITOR_SOURCE=replay \
 SENSOR_MONITOR_REPLAY_FILE=examples/telemetry.jsonl \
-SENSOR_MONITOR_REPLAY_LOOP=true \
+SENSOR_MONITOR_REPLAY_LOOP=false \
 sensor-monitor serve
 ```
+
+Windows PowerShell:
+
+```powershell
+$env:SENSOR_MONITOR_SOURCE = "replay"
+$env:SENSOR_MONITOR_REPLAY_FILE = "examples/telemetry.jsonl"
+$env:SENSOR_MONITOR_REPLAY_LOOP = "false"
+.\.venv\Scripts\sensor-monitor.exe serve
+```
+
+Replay streams the capture with bounded memory and preserves its sequence numbers, uptime, and sensor values. Once a one-pass capture ends, `/healthz` returns `503` because acquisition has finished; REST history remains available until shutdown. A new gateway process starts with empty history and sequence baselines.
+
+`SENSOR_MONITOR_REPLAY_LOOP` defaults to `true` for compatibility. When enabled, it rereads the original records without resetting sequence baselines. Repeating the bundled capture accepts three samples on the first pass and rejects all three on each later pass as sequence anomalies; health then ages to stale/offline. Use simulator mode for an ongoing live demo. Set `SENSOR_MONITOR_SOURCE=simulator` in a new shell, or `$env:SENSOR_MONITOR_SOURCE = "simulator"` in PowerShell, before restarting the demo.
 
 ### STM32 serial input
 
@@ -226,11 +252,12 @@ sensor-monitor validate examples/telemetry.jsonl
 | Alert behavior | critical threshold, independent counters, no repeated spam, recovery |
 | State | bounded history, duplicate/backward sequence, online/stale/offline timeouts |
 | Network API | REST success/404, simulator fault endpoint, WebSocket snapshot and update |
-| CLI | capture validation and generated firmware-shaped JSONL |
+| Capture files | bounded reads, shared live/CLI frame limits, physical error line numbers, recovery after malformed or oversized records, and optional final newline |
+| CLI | capture validation exit status and generated firmware-shaped JSONL |
 
 CI runs lint and the full suite on Python 3.11, 3.12, and 3.13, then independently builds the production container.
 
-Local verification on September 4, 2026: Python 3.12.14 on Windows, **50 tests passed**, **93.09% combined line/branch coverage**, and `ruff check .` passed. The serial hardware path and Raspberry Pi deployment were not exercised in this run. CI results are available from the badge; CI configuration alone is not proof of a successful run.
+Local verification on October 1, 2026: Python 3.12.14 on Windows, **69 tests passed**, **94.16% combined line/branch coverage**, `ruff check .` passed, and sample validation reported `accepted=3 rejected=0`. The suite includes generated captures and mocked file I/O; the serial hardware path and Raspberry Pi deployment were not exercised. One upstream Starlette/httpx deprecation warning was emitted by the test client. Published commit and observed CI results are recorded in [WORKFLOW.md](WORKFLOW.md); CI configuration alone is not proof of a successful run.
 
 ## Deployment
 
@@ -280,6 +307,7 @@ The supplied unit restarts on failure and enables `NoNewPrivileges`, `ProtectSys
 |   |-- app.py             # FastAPI routes, lifespan, WebSocket
 |   |-- hub.py             # acquisition and bounded fan-out
 |   |-- protocol.py        # strict incremental JSONL decoder
+|   |-- capture.py         # bounded capture records for validation/replay
 |   |-- sources.py         # serial, simulator, and replay inputs
 |   |-- store.py           # bounded concurrency-safe history
 |   |-- alerts.py          # transition-based fault policy
@@ -296,7 +324,9 @@ The supplied unit restarts on failure and enables `NoNewPrivileges`, `ProtectSys
 
 - API authentication and TLS are not built into the service. Use an authenticated reverse proxy before leaving a trusted lab network.
 - History is intentionally ephemeral. Add a TimescaleDB, SQLite, or MQTT sink if retention across restarts is required.
+- An explicit boot/session policy and a bridge to the separate FreeRTOS telemetry schema remain pending; matching hardware names do not establish wire compatibility.
 - The serial reader reconnects after OS/driver errors and exposes an attempt counter, but production alert routing for repeated reconnects is outside this first release.
+- Transport reconnects currently preserve decoder state. A partial or oversized frame before disconnect can cause the first record after reconnect to be rejected; resetting framing at transport boundaries remains a follow-up.
 - Before declaring target validation complete, capture a long-running STM32 session, replay it through the validator, run serial disconnect/reconnect tests on the Pi, confirm service restart behavior, and record CPU/memory/latency measurements with the exact board and image revision.
 
 ## License

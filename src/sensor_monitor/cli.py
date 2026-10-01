@@ -10,9 +10,10 @@ from pathlib import Path
 
 import uvicorn
 
+from .capture import iter_capture_records
 from .config import Settings
 from .models import WireTelemetry
-from .protocol import ProtocolError, parse_frame
+from .protocol import NewlineJsonDecoder, ProtocolError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -57,16 +58,15 @@ def _simulate(count: int, interval: float) -> int:
 def _validate(path: Path) -> int:
     accepted = 0
     rejected = 0
+    decoder = NewlineJsonDecoder()
     with path.open("rb") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            try:
-                parse_frame(line.rstrip(b"\r\n"))
-                accepted += 1
-            except ProtocolError as exc:
-                rejected += 1
-                print(f"line {line_number}: {exc}", file=sys.stderr)
+        for line_number, raw in iter_capture_records(stream):
+            for event in decoder.feed_events(raw + b"\n"):
+                if isinstance(event, ProtocolError):
+                    rejected += 1
+                    print(f"line {line_number}: {event}", file=sys.stderr)
+                else:
+                    accepted += 1
     print(f"accepted={accepted} rejected={rejected}")
     return 1 if rejected else 0
 
