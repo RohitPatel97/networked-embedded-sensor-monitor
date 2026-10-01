@@ -45,7 +45,9 @@ No whitespace errors.
 
 The commands used the repository's `.venv/Scripts` executables. The warning is an upstream Starlette/httpx test-client deprecation. The cancellation regression was added after its cleanup fix and passed; no failing-before result is claimed for that case.
 
-Publication: pending the implementation push and GitHub Actions result.
+Published implementation: [`105c46e19ca0183e5786c791e2ac4383a8fa69d1`](https://github.com/RohitPatel97/networked-embedded-sensor-monitor/commit/105c46e19ca0183e5786c791e2ac4383a8fa69d1), pushed to `main`.
+
+Observed [GitHub Actions run 36883808043](https://github.com/RohitPatel97/networked-embedded-sensor-monitor/actions/runs/36883808043): **success** for Python 3.11, 3.12, and 3.13 (lint, tests, sample validation) and the production container build. CI emitted upstream action-runtime deprecation annotations; all jobs passed. This publication record is a subsequent documentation-only commit; the linked implementation commit identifies the tested source.
 
 ### Remaining limits
 
