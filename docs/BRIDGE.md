@@ -66,9 +66,11 @@ The gateway currently requires temperature, pressure, and acceleration in every
 reading. A null payload in either sensor therefore raises `BridgeError` with an
 `incomplete sensor frame` diagnostic. It is a valid but unsupported source frame,
 not evidence of malformed firmware output. The bridge does not substitute zeros,
-reuse old measurements, or invent health counts. During missing-sensor intervals,
-the gateway receives no complete converted readings and its normal age-based
-health can become stale/offline. Source-specific partial-sensor health is not
+reuse old measurements, or invent health counts. File conversion omits these
+partial records. Replay sends the retained records at its configured fixed
+interval and does not reconstruct original timestamp gaps, so converted replay
+compresses missing-sensor outages and cannot verify their timing or age-based
+stale/offline transitions. Source-specific partial-sensor health is not
 represented in the gateway API.
 
 ## Boot and replay policy

@@ -74,7 +74,7 @@ The remaining software work was explicit reboot/session identity, incompatible F
 - Final local suite: **198 passed, 97.52% combined line/branch coverage** on Windows Python 3.12.14. One upstream Starlette/httpx test-client deprecation warning remains. Ruff passed; `git diff --check` passed.
 - V1 fixture: `accepted=3 rejected=0`. FreeRTOS fixture: `converted=2 rejected=0`, then `accepted=2 rejected=0` in gateway validation.
 - Running loopback simulator: readiness, nonempty device history, WebSocket initial snapshot, active critical-temperature alert and recovery all passed. Observed output: `ok source=simulator accepted=384 devices=1 last_sequence=383`. The [saved API check](docs/validation/host-api-20261012.json) records the later snapshot with 391 accepted frames and no parse errors.
-- `docs/SOAK_TEST.md` defines the 600-second acceptance profile before its full run; the harness records source hashes so the working-tree code can be traced to the published implementation. Full-run results are recorded after completion.
+- `docs/SOAK_TEST.md` defined the 600-second acceptance profile before its full run; the harness recorded source hashes so the working-tree code can be traced to the published implementation. The observed result is recorded below.
 
 ### Validation boundaries and resume synchronization
 
@@ -84,7 +84,29 @@ The master resume and both role-specific PDFs were updated locally with project-
 
 Current limits: ephemeral storage and gateway baselines; unauthenticated producer boot IDs; operator-provided identity for converted captures; complete-sensor bridge subset; simulated/mocked transport and host-only timing/memory evidence. Physical UART/Pi/systemd acceptance remains open. Production persistence and authentication are outside the portfolio gateway scope.
 
-Publication and final soak/CI evidence are appended after observation.
+### Publication
+
+Published implementation: [`a9b692183be6b5f84aff19870b77b5141f917ebb`](https://github.com/RohitPatel97/networked-embedded-sensor-monitor/commit/a9b692183be6b5f84aff19870b77b5141f917ebb), pushed to `main`.
+
+Observed [GitHub Actions run 38286683654](https://github.com/RohitPatel97/networked-embedded-sensor-monitor/actions/runs/38286683654): **success** for Python 3.11, 3.12, and 3.13 (lint, tests, legacy fixture validation, FreeRTOS conversion and converted-fixture validation). The production container built, started, and passed the stricter readiness/accepted-frame/device-history smoke check. A subsequent documentation/evidence commit records these results and clarifies that replay compresses source timing gaps and bounded history is not a total process-memory ceiling.
+
+### Observed full host soak
+
+The [saved JSON report](docs/validation/host-soak-20261012.json) records **all 17 acceptance checks passed**, exit status 0, from the run starting at `2026-10-12T17:42:37.401304+00:00` on Windows/Python 3.12.14:
+
+| Measurement | Observed result |
+| --- | --- |
+| Duration and achieved rate | 600.006 seconds; 99.999 frames/s |
+| Generated / received / accepted / fast-consumed | 60,000 each; no parse, sequence, capacity or fast-order errors |
+| Fast subscriber latency | p95 upper bound 1 ms; maximum 4.872 ms; all 60,000 samples measured |
+| Scripted transport resets / boot changes | 59 / 20 |
+| Stalled-subscriber drops | Exactly 59,992; latest eight frame indices retained |
+| Device history | Exactly 120 readings for each of four devices |
+| Traced Python allocation growth | 333 bytes above warmup baseline, maximum of 1,129 post-warmup samples; 5 MiB limit |
+
+Latency measures encoding completion through the in-process fast subscriber; memory measures sampled current `tracemalloc` allocations, not RSS. The run includes no physical serial driver, Pi, HTTP or network transport. The separate API evidence covers loopback HTTP/WebSocket behavior.
+
+The report truthfully records launch HEAD `65bd5a1` with a dirty worktree because it began before the implementation commit. After completion, all ten launch-time SHA256 values matched the unchanged local files; their content also matched published implementation `a9b6921` after Git CRLF/LF normalization. The raw report retains its original launch metadata. No thresholds were relaxed after this run.
 
 ## Reproduce validation
 

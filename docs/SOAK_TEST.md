@@ -69,4 +69,21 @@ changes beyond the recorded HEAD; record its eventual published commit in WORKFL
 For a quick harness check, use `--duration 5 --warmup 1`; this is a different profile
 and must not be presented as the 600-second soak. The short regression test exercises
 boot changes, reconnects, accounting, threshold failures, and histogram overflow.
-No full-run result is claimed until the evidence JSON exists and its checks pass.
+
+## Observed October 12 run
+
+The [600-second report](validation/host-soak-20261012.json) passed all 17 checks:
+60,000 frames generated, received, accepted and consumed by the fast subscriber;
+zero parse, freshness, capacity or ordering errors; 59 scripted resets; 20 boot
+changes; and exactly 59,992 deliberate stalled-subscriber drops. Every device
+retained 120 readings and the stalled queue retained the latest eight indices.
+
+Elapsed time was 600.006 seconds (99.999 frames/s). Fast-subscriber p95 latency
+was at most 1 ms, with a 4.872 ms maximum. Maximum sampled current traced Python
+allocation growth above the warmup baseline was 333 bytes across 1,129 samples,
+below the predefined 5 MiB limit. These measurements have the scope limits above.
+
+The run began with uncommitted implementation changes. Its ten source-file hashes
+were verified unchanged at completion, and content matched published commit
+`a9b692183be6b5f84aff19870b77b5141f917ebb` after CRLF/LF normalization. See
+[WORKFLOW.md](../WORKFLOW.md) for publication and CI evidence.

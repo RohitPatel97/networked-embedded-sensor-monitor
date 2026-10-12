@@ -107,7 +107,7 @@ flowchart LR
     WS --> UI
 ```
 
-The acquisition loop is independent of HTTP clients. A slow WebSocket consumer cannot block UART ingestion: each subscriber gets a bounded queue, and the oldest pending update is discarded under backpressure while `websocket_drops` records the event. Telemetry and alert histories use bounded deques so the process has a predictable memory ceiling.
+The acquisition loop is independent of HTTP clients. A slow WebSocket consumer cannot block UART ingestion: each subscriber gets a bounded queue, and the oldest pending update is discarded under backpressure while `websocket_drops` records the event. Telemetry and alert histories stay within configured retention limits. Total process memory also depends on subscriber count and runtime overhead; the service does not impose a global client limit.
 
 ## UART wire protocol
 
@@ -291,7 +291,7 @@ CI runs lint, the full suite, example validation and FreeRTOS conversion on Pyth
 
 Local verification on October 12, 2026: Python 3.12.14 on Windows, **198 tests passed**, **97.52% combined line/branch coverage**, and `ruff check .` passed. The v1 sample validated with `accepted=3 rejected=0`; the upstream fixture converted two records and both passed gateway validation. A running loopback simulator also passed readiness/history checks, WebSocket snapshot delivery, critical-temperature alert and recovery checks. The suite includes generated captures and mocked I/O; physical UART and Pi deployment were not exercised. One upstream Starlette/httpx deprecation warning was emitted by the test client. Published commits and observed CI results are recorded in [WORKFLOW.md](WORKFLOW.md); CI configuration alone is not proof of a successful run.
 
-The [host soak harness](docs/SOAK_TEST.md) defines a 600-second, 100-frame/s profile across four devices before execution, with bounds on latency, Python allocation growth and subscriber loss accounting. Run it with `python scripts/soak_test.py`. Its scripted transport resets and traced Python allocations must not be described as physical reconnects or process RSS. See [the loopback API evidence](docs/validation/host-api-20261012.json) for the separately observed network check.
+The [host soak](docs/SOAK_TEST.md) passed its predefined 600-second, 100-frame/s profile across four devices on October 12: **60,000/60,000 frames accepted and delivered in order to the fast subscriber**, p95 delivery latency **at most 1 ms**, 59 scripted reconnects and 20 boot transitions. Sampled current Python allocation growth after warmup was 333 bytes; all histories and queues stayed within configured bounds, including exactly 59,992 deliberate drops for the stalled subscriber. [The full report](docs/validation/host-soak-20261012.json) records all 17 passing checks, thresholds and source hashes. Run it with `python scripts/soak_test.py`. Latency excludes HTTP/network/hardware, and traced allocations are not process RSS. See [the loopback API evidence](docs/validation/host-api-20261012.json) for the separately observed network check.
 
 ## Deployment
 
