@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "networked-embedded-sensor-monitor"
-version = "1.1.0"
+version = "1.2.0"
 description = "STM32 telemetry gateway with REST, WebSocket, health, alerts, and a deterministic simulator"
 readme = "README.md"
 requires-python = ">=3.11"

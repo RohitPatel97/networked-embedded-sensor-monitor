@@ -57,6 +57,35 @@ Observed [GitHub Actions run 36883808043](https://github.com/RohitPatel97/networ
 - Serial reconnects still preserve partial decoder state; transport-boundary framing reset needs a separate change and regression test.
 - Bounded capture buffering does not establish a measured process RSS or latency ceiling. Cancellation waits for the active file operation to finish; it cannot abort a stalled OS read.
 
+## October 12, 2026 - software completion milestone
+
+### Problem and solution
+
+The remaining software work was explicit reboot/session identity, incompatible FreeRTOS telemetry, transport framing surviving reconnects, and reproducible sustained-load evidence. Version 1.2 adds opt-in protocol v2 with a producer-maintained increasing uint64 boot counter; rejects older sessions and legacy downgrade; preserves uint32 rollover, bounded history and alert continuity; and resets only decoder framing when serial connections change.
+
+`convert-freertos` maps the pinned upstream complete-sample schema to gateway v2 with explicit device/boot IDs and units. It rejects unavailable sensor payloads rather than fabricating values, retains unknown battery/watchdog counts as null, and reports physical line diagnostics. Upstream raw fixtures and their SHA256 provenance are documented in `docs/BRIDGE.md`.
+
+### Regression cases and observed results
+
+- Session tests first produced **8 failed, 7 passed** against the old schema. The completed tests cover boot transition, older boot, downgrade, duplicate, wraparound, independent devices, gateway restart and alert/fan-out isolation.
+- Eight mock serial cases cover partial/oversized reconnect, idle timeout fragmentation, failed-open retry, stop during read/backoff, and cancellation during open/read without resource leaks.
+- Bridge and CLI cases cover integer/numeric bounds, incomplete/null sensors, unit mappings, duplicate JSON keys, malformed/oversized input, partial conversion, invalid CLI flags and input-file overwrite protection.
+- Review found and fixed simulator interval overflow and a smoke-check gap that accepted an empty telemetry history.
+- Final local suite: **198 passed, 97.52% combined line/branch coverage** on Windows Python 3.12.14. One upstream Starlette/httpx test-client deprecation warning remains. Ruff passed; `git diff --check` passed.
+- V1 fixture: `accepted=3 rejected=0`. FreeRTOS fixture: `converted=2 rejected=0`, then `accepted=2 rejected=0` in gateway validation.
+- Running loopback simulator: readiness, nonempty device history, WebSocket initial snapshot, active critical-temperature alert and recovery all passed. Observed output: `ok source=simulator accepted=384 devices=1 last_sequence=383`. The [saved API check](docs/validation/host-api-20261012.json) records the later snapshot with 391 accepted frames and no parse errors.
+- `docs/SOAK_TEST.md` defines the 600-second acceptance profile before its full run; the harness records source hashes so the working-tree code can be traced to the published implementation. Full-run results are recorded after completion.
+
+### Validation boundaries and resume synchronization
+
+The public GitHub evidence audit found no physical capture bundle in this repository or the two FreeRTOS branches inspected, no releases, and no currently available Actions artifacts. The pinned upstream physical checklist remains unverified; this does not rule out private or expired evidence. See `docs/HARDWARE_VALIDATION.md`.
+
+The master resume and both role-specific PDFs were updated locally with project-based features, **198 host tests / 97.5% line/branch coverage**, and mock-tested UART recovery. They retain unrelated experience and links; each remains one page after visual QA. No physical hardware or unobserved soak claim was added. Resume files are outside this public code repository.
+
+Current limits: ephemeral storage and gateway baselines; unauthenticated producer boot IDs; operator-provided identity for converted captures; complete-sensor bridge subset; simulated/mocked transport and host-only timing/memory evidence. Physical UART/Pi/systemd acceptance remains open. Production persistence and authentication are outside the portfolio gateway scope.
+
+Publication and final soak/CI evidence are appended after observation.
+
 ## Reproduce validation
 
 ```sh
@@ -64,13 +93,16 @@ python -m pip install -e ".[dev]"
 python -m ruff check .
 python -m pytest --cov=sensor_monitor --cov-report=term-missing
 sensor-monitor validate examples/telemetry.jsonl
+sensor-monitor convert-freertos examples/freertos_telemetry.ndjson --device-id hub-01 --boot-id 100 --output converted.jsonl
+sensor-monitor validate converted.jsonl
+python scripts/soak_test.py --output docs/validation/host-soak-20261012.json
 ```
 
-## Next tasks
+## Remaining physical acceptance and optional extensions
 
-1. Design an explicit boot/session identifier and replay policy, then define the FreeRTOS schema bridge. Acceptance: documented field/unit mappings and host tests for incompatible messages, duplicates, stale sessions, reboot, rollover, and gateway restart.
-2. Reset framing across serial reconnects, then exercise UART disconnect/reconnect with an STM32 and Raspberry Pi. Acceptance: a host regression preserves the first complete post-reconnect frame without clearing sequence baselines; record board/image versions, capture files, commands, and physical results separately.
-3. Run a long soak test and record memory, latency, drops, and reconnect behavior. Specify load and duration before interpreting results.
+1. Run the physical acceptance checklist with an STM32 and Raspberry Pi. Acceptance: board/image/firmware identities, raw UART captures, reconnect/reboot/service tests and retained commands/logs.
+2. Measure a target soak using predefined load, duration and thresholds. Acceptance: Pi RSS, CPU, network latency and loss/reconnect measurements, distinguished from the completed host software checks.
+3. If required for a production deployment, add authenticated ingress and persistent storage/session baselines. These are optional scope extensions, not claims of this release.
 
 ## Working agreement
 

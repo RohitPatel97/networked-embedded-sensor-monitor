@@ -11,7 +11,7 @@ from .alerts import AlertEngine
 from .config import Settings
 from .models import ServiceStats, Snapshot, utc_now
 from .protocol import NewlineJsonDecoder, ProtocolError
-from .sources import TelemetrySource
+from .sources import SourceReset, TelemetrySource
 from .store import DeviceCapacityError, TelemetryStore
 
 LOGGER = logging.getLogger(__name__)
@@ -49,12 +49,16 @@ class TelemetryHub:
             websocket_clients=len(self._subscribers),
             websocket_drops=self._websocket_drops,
             source_reconnects=self.source.reconnects,
+            session_changes=self.store.session_changes,
         )
 
     async def run(self) -> None:
         LOGGER.info("telemetry acquisition started", extra={"source": self.source.name})
         try:
             async for chunk in self.source.chunks(self._stop):
+                if isinstance(chunk, SourceReset):
+                    self._decoder.reset()
+                    continue
                 for reading in self._decoder.feed_events(chunk):
                     self._frames_received += 1
                     if isinstance(reading, ProtocolError):

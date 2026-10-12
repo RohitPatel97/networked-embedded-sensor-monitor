@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -19,7 +19,8 @@ class StrictModel(BaseModel):
 
 
 class WireTelemetry(StrictModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
+    boot_id: int | None = Field(default=None, ge=0, le=18_446_744_073_709_551_615, strict=True)
     device_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
     sequence: int = Field(ge=0, le=4_294_967_295)
     uptime_ms: int = Field(ge=0)
@@ -29,7 +30,17 @@ class WireTelemetry(StrictModel):
     battery_v: float | None = Field(default=None, ge=0.0, le=30.0)
     i2c_errors: int = Field(default=0, ge=0)
     queue_drops: int = Field(default=0, ge=0)
-    watchdog_resets: int = Field(default=0, ge=0)
+    watchdog_resets: int | None = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def session_matches_schema(self) -> Self:
+        if self.schema_version == 2 and self.boot_id is None:
+            raise ValueError("schema_version 2 requires an explicit boot_id")
+        if self.schema_version == 1 and self.boot_id is not None:
+            raise ValueError("boot_id requires schema_version 2")
+        if self.schema_version == 1 and self.watchdog_resets is None:
+            raise ValueError("schema_version 1 requires a numeric watchdog_resets count")
+        return self
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -65,9 +76,10 @@ class DeviceHealth(StrictModel):
     last_seen: datetime
     age_seconds: float = Field(ge=0.0)
     last_sequence: int
+    boot_id: int | None = None
     i2c_errors: int
     queue_drops: int
-    watchdog_resets: int
+    watchdog_resets: int | None
     detail: str
 
 
@@ -94,6 +106,7 @@ class ServiceStats(StrictModel):
     frames_accepted: int = 0
     parse_errors: int = 0
     sequence_anomalies: int = 0
+    session_changes: int = 0
     device_rejections: int = 0
     websocket_clients: int = 0
     websocket_drops: int = 0

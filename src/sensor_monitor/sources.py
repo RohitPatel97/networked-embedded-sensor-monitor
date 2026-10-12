@@ -8,6 +8,7 @@ import math
 import random
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from .capture import iter_capture_file
@@ -18,12 +19,17 @@ from .protocol import MAX_FRAME_BYTES, encode_frame
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class SourceReset:
+    """A new byte stream has begun; discard framing state, not device history."""
+
+
 class TelemetrySource:
     name = "unknown"
     reconnects = 0
 
-    async def chunks(self, stop: asyncio.Event) -> AsyncIterator[bytes]:
-        """Yield one or more chunks from an underlying byte stream."""
+    async def chunks(self, stop: asyncio.Event) -> AsyncIterator[bytes | SourceReset]:
+        """Yield byte chunks or an explicit boundary between independent streams."""
         raise NotImplementedError
         yield b""  # pragma: no cover - keeps the base contract an async iterator
 
@@ -124,9 +130,11 @@ class SerialSource(TelemetrySource):
         self.baud_rate = baud_rate
         self.reconnect_delay = reconnect_delay
         self._serial: object | None = None
+        self._pending: asyncio.Task | None = None
+        self._close_lock = asyncio.Lock()
         self.reconnects = 0
 
-    async def chunks(self, stop: asyncio.Event) -> AsyncIterator[bytes]:
+    async def chunks(self, stop: asyncio.Event) -> AsyncIterator[bytes | SourceReset]:
         try:
             import serial
         except ImportError as exc:  # pragma: no cover - dependency is declared
@@ -134,35 +142,62 @@ class SerialSource(TelemetrySource):
 
         while not stop.is_set():
             try:
-                self._serial = await asyncio.to_thread(
-                    serial.Serial,
-                    self.port,
-                    self.baud_rate,
-                    timeout=0.5,
-                    exclusive=True,
-                )
-                while not stop.is_set():
-                    chunk = await asyncio.to_thread(
-                        self._serial.read_until, b"\n", MAX_FRAME_BYTES + 1
+                async def connect() -> None:
+                    self._serial = await asyncio.to_thread(
+                        serial.Serial,
+                        self.port,
+                        self.baud_rate,
+                        timeout=0.5,
+                        exclusive=True,
                     )
+
+                self._pending = asyncio.create_task(connect())
+                await asyncio.shield(self._pending)
+                if stop.is_set():
+                    return
+                yield SourceReset()
+                while not stop.is_set():
+                    self._pending = asyncio.create_task(
+                        asyncio.to_thread(
+                            self._serial.read_until, b"\n", MAX_FRAME_BYTES + 1
+                        )
+                    )
+                    chunk = await asyncio.shield(self._pending)
+                    if stop.is_set():
+                        break
                     if chunk:
                         yield chunk
             except (serial.SerialException, OSError):
+                if stop.is_set():
+                    return
                 self.reconnects += 1
                 LOGGER.warning(
                     "serial source unavailable; retrying in %.1f s",
                     self.reconnect_delay,
                     extra={"port": self.port, "attempt": self.reconnects},
                 )
-                await self.close()
-                await asyncio.sleep(self.reconnect_delay)
             finally:
                 await self.close()
+            if not stop.is_set():
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=self.reconnect_delay)
 
     async def close(self) -> None:
-        serial_port, self._serial = self._serial, None
-        if serial_port is not None:
-            await asyncio.to_thread(serial_port.close)
+        async with self._close_lock:
+            # Worker threads cannot be cancelled by cancelling their awaiters.
+            # Finish pending open/read calls before releasing the port; reads have
+            # a 0.5-second driver timeout. Concurrent stop/finally calls close once.
+            if self._pending is not None:
+                with suppress(Exception):
+                    await asyncio.shield(self._pending)
+                self._pending = None
+            serial_port, self._serial = self._serial, None
+            if serial_port is not None:
+                closing = asyncio.create_task(asyncio.to_thread(serial_port.close))
+                try:
+                    await asyncio.shield(closing)
+                finally:
+                    await closing
 
 
 def build_source(settings: Settings) -> TelemetrySource:

@@ -22,9 +22,14 @@ class TelemetryStore:
         )
         self._alerts: deque[Alert] = deque(maxlen=settings.alert_history_size)
         self._lock = asyncio.Lock()
+        self._session_changes = 0
+
+    @property
+    def session_changes(self) -> int:
+        return self._session_changes
 
     async def add_reading(self, reading: TelemetryReading) -> bool:
-        """Store fresh samples only, using uint32 serial-number arithmetic.
+        """Store fresh samples using an ordered boot counter and uint32 sequence.
 
         Duplicate, backward, and ambiguous half-range jumps do not refresh health,
         replace history, or change the accepted sequence baseline.
@@ -37,9 +42,19 @@ class TelemetryStore:
                 raise DeviceCapacityError("device limit reached")
             history = self._readings[reading.device_id]
             if history:
-                delta = (reading.sequence - history[-1].sequence) & 0xFFFFFFFF
-                if not 0 < delta < 0x80000000:
-                    return False
+                previous = history[-1]
+                if reading.boot_id == previous.boot_id:
+                    delta = (reading.sequence - previous.sequence) & 0xFFFFFFFF
+                    if not 0 < delta < 0x80000000:
+                        return False
+                else:
+                    # A legacy downgrade or older boot can never replace a v2
+                    # baseline. A newer boot (or first v2 frame) starts a sequence.
+                    if reading.boot_id is None or (
+                        previous.boot_id is not None and reading.boot_id < previous.boot_id
+                    ):
+                        return False
+                    self._session_changes += 1
             history.append(reading)
             return True
 
@@ -106,6 +121,7 @@ class TelemetryStore:
             last_seen=reading.received_at,
             age_seconds=round(age, 3),
             last_sequence=reading.sequence,
+            boot_id=reading.boot_id,
             i2c_errors=reading.i2c_errors,
             queue_drops=reading.queue_drops,
             watchdog_resets=reading.watchdog_resets,

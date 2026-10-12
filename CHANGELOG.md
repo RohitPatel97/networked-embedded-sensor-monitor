@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased - 2026-10-01
+## 1.2.0 - 2026-10-12
+
+- Add opt-in protocol v2 with explicit uint64 boot counters, older-session/downgrade rejection, and preserved v1/uint32 rollover behavior.
+- Expose boot identity in readings/health and count accepted session changes; retain alert transitions across boots.
+- Clear only decoder framing at serial connection boundaries and coordinate worker I/O cleanup with stop/cancellation.
+- Add an explicit, bounded FreeRTOS capture converter with verified unit mappings, incomplete-frame diagnostics, and unknown battery/watchdog values.
+- Add a reproducible timed host soak harness with bounded metrics, predeclared limits, and source hashes.
+- Expand regression coverage and verify the running simulator's REST/WebSocket/fault-recovery flow.
+- Run current GitHub Actions and strengthen container CI to verify acquisition, history and API responses.
+- Document session contracts, bridge provenance and physical hardware acceptance separately.
+
+### Included capture hardening from October 1
 
 - Enforce the live 2048-byte frame limit in capture validation, with physical error line numbers and recovery after invalid records.
 - Stream replay captures through bounded reads instead of loading the entire file; preserve LF framing and accept an optional final newline.

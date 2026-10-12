@@ -39,6 +39,11 @@ class NewlineJsonDecoder:
     def buffered_bytes(self) -> int:
         return len(self._buffer)
 
+    def reset(self) -> None:
+        """Forget an incomplete frame when its underlying byte stream ends."""
+        self._buffer.clear()
+        self._discarding = False
+
     def feed(
         self, chunk: bytes, *, received_at: datetime | None = None
     ) -> Iterable[TelemetryReading]:
@@ -93,6 +98,10 @@ def parse_frame(raw: bytes, *, received_at: datetime | None = None) -> Telemetry
 def encode_frame(reading: WireTelemetry) -> bytes:
     """Produce the compact, deterministic representation used by fixtures/simulator."""
     return (
-        json.dumps(reading.model_dump(), separators=(",", ":"), sort_keys=True).encode()
+        json.dumps(
+            reading.model_dump(exclude={"boot_id"} if reading.schema_version == 1 else set()),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
         + b"\n"
     )

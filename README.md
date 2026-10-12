@@ -7,6 +7,8 @@
 
 A Raspberry Pi-class gateway that turns newline-delimited STM32 UART telemetry into a validated, observable network service. It provides REST history, live WebSocket updates, device-health state, transition-based alerts, rotating logs, and a zero-dependency browser dashboard. A deterministic simulator and JSONL replay source make every software path demonstrable without attached hardware.
 
+Version 1.2 adds explicit boot/session ordering, recovery across serial reconnects, and a capture converter for the separate FreeRTOS sensor hub. The software portfolio release includes regression tests, a reproducible host soak harness, and CI checks for the production container. Physical target acceptance is tracked separately in [the hardware checklist](docs/HARDWARE_VALIDATION.md).
+
 > **Validation boundary:** the simulator, parser, API, alert, state, and WebSocket paths are automated and runnable on any development machine. The serial adapter and systemd unit are implementation-ready reference paths; this repository does not claim that the current revision was exercised on a physical STM32 or Raspberry Pi.
 
 ![Live dashboard showing an injected over-temperature fault, degraded device state, rolling telemetry, and a critical alert](docs/dashboard.png)
@@ -17,7 +19,8 @@ _Deterministic simulator with an over-temperature fault injected through the liv
 
 | Engineering claim | Evidence in this repository |
 | --- | --- |
-| STM32 telemetry integration | Versioned, bounded UART JSON protocol and `SerialSource` adapter |
+| STM32 telemetry integration | Bounded v1/v2 UART JSON protocol, mocked serial reconnect tests, and explicit [FreeRTOS capture mapping](docs/BRIDGE.md) |
+| Reboot and delayed-session handling | Monotonic boot IDs, uint32 sequence rollover, downgrade rejection, and [session-policy regressions](docs/PROTOCOL.md) |
 | REST and WebSocket APIs | Typed FastAPI routes, OpenAPI at `/docs`, and bounded live fan-out |
 | Application-simulator fallback | Seeded 10 Hz simulator with five runtime fault modes |
 | Device health and alerts | Online/degraded/stale/offline state machine and transition-only alert engine |
@@ -36,6 +39,9 @@ _Deterministic simulator with an over-temperature fault injected through the liv
 | Acquisition ends or crashes while HTTP stays alive | Readiness returns HTTP 503 when acquisition is no longer running | `tests/test_api.py::test_readiness_fails_when_source_has_finished`, `test_readiness_fails_when_source_crashes` |
 | An oversized capture passed the CLI validator but failed live ingestion | Share the live decoder and enforce the same byte limit, including CRLF and final-line cases | `tests/test_cli.py::test_validate_enforces_uart_byte_limit`, `test_validate_recovers_and_reports_physical_line_numbers` |
 | Replaying a large capture loaded the entire file into memory | Read bounded records, drain oversized lines, and recover at the next LF | `tests/test_sources.py::test_replay_reads_large_capture_in_bounded_pieces`, `tests/test_hub.py::test_replay_rejects_oversized_fault_without_alerts_and_recovers` |
+| A reboot resets sequence numbers while delayed data is still in flight | Require an increasing v2 boot ID; accept a new boot while rejecting older sessions and v1 downgrade | `tests/test_sessions.py` |
+| A UART disconnect leaves an unfinished or oversized frame buffered | Clear framing on successful reconnect without clearing sequence/history/alert state | `tests/test_serial_reconnect.py` |
+| FreeRTOS telemetry uses a different envelope and sensor units | Convert complete records with explicit device/boot IDs, unit mapping, and diagnostics for unsupported input | `tests/test_bridge.py`, `tests/test_bridge_cli.py` |
 
 Architecture, wire protocol, API contracts, deployment, and validation boundaries follow below. [WORKFLOW.md](WORKFLOW.md) records completed work and next tasks.
 
@@ -113,7 +119,8 @@ The transport is UTF-8, newline-delimited JSON at 115200 baud by default. One li
 
 | Field | Type / range | Purpose |
 | --- | --- | --- |
-| `schema_version` | integer, currently `1` | Explicit compatibility boundary |
+| `schema_version` | integer, `1` or `2` | v1 legacy compatibility; v2 explicit boot identity |
+| `boot_id` | uint64, required for v2 | Persisted, increasing boot counter for one device; omitted in v1 |
 | `device_id` | 1-64 safe identifier characters | Stable device key in URLs and histories |
 | `sequence` | unsigned 32-bit integer | Duplicate/out-of-order detection |
 | `uptime_ms` | non-negative integer | Firmware-local time and reset visibility |
@@ -123,9 +130,19 @@ The transport is UTF-8, newline-delimited JSON at 115200 baud by default. One li
 | `battery_v` | optional, 0 to 30 | Supply/battery monitoring |
 | `i2c_errors` | non-negative counter | Sensor-bus fault visibility |
 | `queue_drops` | non-negative counter | Firmware backpressure visibility |
-| `watchdog_resets` | non-negative counter | Task-health recovery visibility |
+| `watchdog_resets` | non-negative counter; v2 also allows `null` | Reset count, or explicitly unknown for a source without this measurement |
 
-Sequence freshness uses `(new - previous) mod 2^32`: deltas from 1 through 2147483647 are forward progress. Zero, backward, and exactly half-range deltas are rejected and counted in `sequence_anomalies`. Rejected samples do not affect history, health age, alerts, or subscribers. The protocol has no authenticated boot/session identifier, so it cannot safely distinguish a device reboot from delayed old data. After a firmware sequence reset, restart the gateway or assign a new device ID to establish a fresh baseline. Do not use this protocol as a security replay-prevention mechanism.
+Within a boot, sequence freshness uses `(new - previous) mod 2^32`: deltas from 1 through 2147483647 are forward progress. Zero, backward, and exactly half-range deltas are rejected and counted in `sequence_anomalies`. Rejected samples do not affect history, health age, alerts, or subscribers.
+
+For v2, the producer must persist and increment `boot_id` for each reboot. A greater boot ID starts a new sequence baseline; older boot IDs and v1 downgrades are rejected. Reusing the same boot ID does not reset sequence checking. `session_changes` counts accepted boot transitions after initial discovery. Alert transitions remain continuous across boots. See [the full policy](docs/PROTOCOL.md) for migration, restart, rollover, and trust rules.
+
+Gateway baselines are in memory and disappear on restart. Legacy v1 sequence resets still require a gateway restart or new device ID. Neither schema authenticates the sender; boot ordering is not cryptographic replay protection.
+
+Generate a v2 example without hardware:
+
+```bash
+sensor-monitor simulate --count 3 --interval 0 --boot-id 100
+```
 
 Validate a capture without starting the server:
 
@@ -220,6 +237,19 @@ sensor-monitor serve
 
 Use a common ground and 3.3 V logic levels. A typical receive-only gateway connection is STM32 UART TX -> adapter RX plus GND -> GND. Board pin selection belongs in the STM32 firmware configuration; it is intentionally not hard-coded here.
 
+### FreeRTOS capture bridge
+
+The separate [FreeRTOS sensor hub](https://github.com/RohitPatel97/freertos-sensor-hub) has a different wire schema. Convert a capture before replaying it:
+
+```bash
+sensor-monitor convert-freertos examples/freertos_telemetry.ndjson --device-id freertos-hub --boot-id 100 --output converted.jsonl
+sensor-monitor validate converted.jsonl
+```
+
+On Windows, use `.\.venv\Scripts\sensor-monitor.exe` for these commands. The converter writes binary UTF-8 JSONL directly, avoiding shell redirection encoding differences. It preserves sequence numbers, converts microseconds to milliseconds and Pa to hPa, and uses the barometer temperature. Provide a known increasing boot ID per actual boot and retain it on repeated replays; the upstream schema has no boot marker.
+
+Incomplete sensor records are rejected with physical line diagnostics instead of invented values. Battery voltage and watchdog reset count remain `null` because the upstream schema does not measure them. Exit codes are `0` for all converted, `1` if records were rejected (the output contains the valid subset), and `2` for configuration or file errors. The command refuses to overwrite its input. This is a capture converter, not an automatic live serial adapter. [Mapping, omitted fields, and fixture provenance](docs/BRIDGE.md) are explicit.
+
 ## Configuration
 
 Copy `.env.example` into your service manager or shell environment. Important controls:
@@ -251,13 +281,17 @@ sensor-monitor validate examples/telemetry.jsonl
 | Input rejection | malformed JSON, invalid UTF-8, missing fields, unsafe device IDs |
 | Alert behavior | critical threshold, independent counters, no repeated spam, recovery |
 | State | bounded history, duplicate/backward sequence, online/stale/offline timeouts |
+| Sessions and serial lifecycle | reboot, stale boot, downgrade, rollover, partial/oversized reconnect, idle read fragmentation, mocked cancellation |
+| FreeRTOS bridge | source schema validation, unit conversion, incomplete records, capture conversion and v2 replay |
 | Network API | REST success/404, simulator fault endpoint, WebSocket snapshot and update |
 | Capture files | bounded reads, shared live/CLI frame limits, physical error line numbers, recovery after malformed or oversized records, and optional final newline |
 | CLI | capture validation exit status and generated firmware-shaped JSONL |
 
-CI runs lint and the full suite on Python 3.11, 3.12, and 3.13, then independently builds the production container.
+CI runs lint, the full suite, example validation and FreeRTOS conversion on Python 3.11, 3.12, and 3.13. It independently builds and runs the production container and checks readiness and the snapshot endpoint.
 
-Local verification on October 1, 2026: Python 3.12.14 on Windows, **69 tests passed**, **94.16% combined line/branch coverage**, `ruff check .` passed, and sample validation reported `accepted=3 rejected=0`. The suite includes generated captures and mocked file I/O; the serial hardware path and Raspberry Pi deployment were not exercised. One upstream Starlette/httpx deprecation warning was emitted by the test client. Published commit and observed CI results are recorded in [WORKFLOW.md](WORKFLOW.md); CI configuration alone is not proof of a successful run.
+Local verification on October 12, 2026: Python 3.12.14 on Windows, **198 tests passed**, **97.52% combined line/branch coverage**, and `ruff check .` passed. The v1 sample validated with `accepted=3 rejected=0`; the upstream fixture converted two records and both passed gateway validation. A running loopback simulator also passed readiness/history checks, WebSocket snapshot delivery, critical-temperature alert and recovery checks. The suite includes generated captures and mocked I/O; physical UART and Pi deployment were not exercised. One upstream Starlette/httpx deprecation warning was emitted by the test client. Published commits and observed CI results are recorded in [WORKFLOW.md](WORKFLOW.md); CI configuration alone is not proof of a successful run.
+
+The [host soak harness](docs/SOAK_TEST.md) defines a 600-second, 100-frame/s profile across four devices before execution, with bounds on latency, Python allocation growth and subscriber loss accounting. Run it with `python scripts/soak_test.py`. Its scripted transport resets and traced Python allocations must not be described as physical reconnects or process RSS. See [the loopback API evidence](docs/validation/host-api-20261012.json) for the separately observed network check.
 
 ## Deployment
 
@@ -308,6 +342,7 @@ The supplied unit restarts on failure and enables `NoNewPrivileges`, `ProtectSys
 |   |-- hub.py             # acquisition and bounded fan-out
 |   |-- protocol.py        # strict incremental JSONL decoder
 |   |-- capture.py         # bounded capture records for validation/replay
+|   |-- bridge.py          # explicit FreeRTOS schema-1 to gateway-v2 mapping
 |   |-- sources.py         # serial, simulator, and replay inputs
 |   |-- store.py           # bounded concurrency-safe history
 |   |-- alerts.py          # transition-based fault policy
@@ -324,9 +359,9 @@ The supplied unit restarts on failure and enables `NoNewPrivileges`, `ProtectSys
 
 - API authentication and TLS are not built into the service. Use an authenticated reverse proxy before leaving a trusted lab network.
 - History is intentionally ephemeral. Add a TimescaleDB, SQLite, or MQTT sink if retention across restarts is required.
-- An explicit boot/session policy and a bridge to the separate FreeRTOS telemetry schema remain pending; matching hardware names do not establish wire compatibility.
+- Boot/session ordering relies on a correctly persisted producer counter. Gateway restarts discard baselines, and FreeRTOS capture conversion requires an operator-supplied device/boot identity.
 - The serial reader reconnects after OS/driver errors and exposes an attempt counter, but production alert routing for repeated reconnects is outside this first release.
-- Transport reconnects currently preserve decoder state. A partial or oversized frame before disconnect can cause the first record after reconnect to be rejected; resetting framing at transport boundaries remains a follow-up.
+- Serial reconnect framing and cancellation are host-tested with mocks. Physical driver timing, UART wiring, Pi/systemd behavior and sustained hardware performance remain unverified.
 - Before declaring target validation complete, capture a long-running STM32 session, replay it through the validator, run serial disconnect/reconnect tests on the Pi, confirm service restart behavior, and record CPU/memory/latency measurements with the exact board and image revision.
 
 ## License
